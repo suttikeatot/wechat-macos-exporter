@@ -28,12 +28,14 @@
 #include <sys/stat.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <CommonCrypto/CommonCrypto.h>
 
 #define MAX_KEYS 256
 #define KEY_SIZE 32
 #define SALT_SIZE 16
 #define HEX_PATTERN_LEN 96  /* 64 hex (key) + 32 hex (salt) */
 #define CHUNK_SIZE (2 * 1024 * 1024)
+#define DB_PAGE_SIZE 4096
 
 typedef struct {
     char key_hex[65];
@@ -43,11 +45,13 @@ typedef struct {
 
 /* Forward declaration */
 static int read_db_salt(const char *path, char *salt_hex_out);
+static int verify_candidate_key(const char *key_hex, char *matched_salt, char *matched_db);
 
 /* nftw callback state for collecting DB files */
 #define MAX_DBS 256
 static char g_db_salts[MAX_DBS][33];
 static char g_db_names[MAX_DBS][256];
+static char g_db_paths[MAX_DBS][768];
 static int g_db_count = 0;
 static int nftw_collect_db(const char *fpath, const struct stat *sb,
                            int typeflag, struct FTW *ftwbuf) {
@@ -70,6 +74,8 @@ static int nftw_collect_db(const char *fpath, const struct stat *sb,
     }
     strncpy(g_db_names[g_db_count], rel, 255);
     g_db_names[g_db_count][255] = '\0';
+    strncpy(g_db_paths[g_db_count], fpath, 767);
+    g_db_paths[g_db_count][767] = '\0';
     printf("  %s: salt=%s\n", g_db_names[g_db_count], salt);
     g_db_count++;
     return 0;
@@ -77,6 +83,23 @@ static int nftw_collect_db(const char *fpath, const struct stat *sb,
 
 static int is_hex_char(unsigned char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int hex_val(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int hex_to_bytes(const char *hex, unsigned char *out, size_t out_len) {
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_val((unsigned char)hex[i * 2]);
+        int lo = hex_val((unsigned char)hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 0;
 }
 
 static pid_t find_wechat_pid(void) {
@@ -102,6 +125,49 @@ static int read_db_salt(const char *path, char *salt_hex_out) {
     for (int i = 0; i < 16; i++)
         sprintf(salt_hex_out + i * 2, "%02x", header[i]);
     salt_hex_out[32] = '\0';
+    return 0;
+}
+
+static int verify_key_for_path(const unsigned char *key, const char *path) {
+    unsigned char page[DB_PAGE_SIZE];
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(page, 1, DB_PAGE_SIZE, f);
+    fclose(f);
+    if (n != DB_PAGE_SIZE) return 0;
+
+    unsigned char mac_salt[SALT_SIZE];
+    for (int i = 0; i < SALT_SIZE; i++) mac_salt[i] = page[i] ^ 0x3A;
+
+    unsigned char mac_key[KEY_SIZE];
+    if (CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)key, KEY_SIZE,
+                             mac_salt, SALT_SIZE,
+                             kCCPRFHmacAlgSHA512, 2,
+                             mac_key, KEY_SIZE) != kCCSuccess) {
+        return 0;
+    }
+
+    CCHmacContext ctx;
+    unsigned char digest[CC_SHA512_DIGEST_LENGTH];
+    uint32_t pgno = 1;
+    CCHmacInit(&ctx, kCCHmacAlgSHA512, mac_key, KEY_SIZE);
+    CCHmacUpdate(&ctx, page + SALT_SIZE, DB_PAGE_SIZE - 80);
+    CCHmacUpdate(&ctx, &pgno, sizeof(pgno));
+    CCHmacFinal(&ctx, digest);
+
+    return memcmp(digest, page + DB_PAGE_SIZE - 64, CC_SHA512_DIGEST_LENGTH) == 0;
+}
+
+static int verify_candidate_key(const char *key_hex, char *matched_salt, char *matched_db) {
+    unsigned char key[KEY_SIZE];
+    if (hex_to_bytes(key_hex, key, KEY_SIZE) != 0) return 0;
+    for (int j = 0; j < g_db_count; j++) {
+        if (verify_key_for_path(key, g_db_paths[j])) {
+            strcpy(matched_salt, g_db_salts[j]);
+            strcpy(matched_db, g_db_names[j]);
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -174,6 +240,7 @@ int main(int argc, char *argv[]) {
     printf("\nScanning memory for keys...\n");
     key_entry_t keys[MAX_KEYS];
     int key_count = 0;
+    int pattern_count = 0;
     size_t total_scanned = 0;
     int region_count = 0;
 
@@ -189,8 +256,7 @@ int main(int argc, char *argv[]) {
         if (kr != KERN_SUCCESS) break;
         if (size == 0) { addr++; continue; }  /* guard against infinite loop */
 
-        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) ==
-            (VM_PROT_READ | VM_PROT_WRITE)) {
+        if (info.protection & VM_PROT_READ) {
             region_count++;
 
             mach_vm_address_t ca = addr;
@@ -205,30 +271,57 @@ int main(int argc, char *argv[]) {
                     unsigned char *buf = (unsigned char *)data;
                     total_scanned += dc;
 
-                    for (size_t i = 0; i + HEX_PATTERN_LEN + 3 < dc; i++) {
+                    for (size_t i = 0; i + 67 < dc; i++) {
                         if (buf[i] == 'x' && buf[i + 1] == '\'') {
-                            /* Check if followed by 96 hex chars and closing ' */
-                            int valid = 1;
-                            for (int j = 0; j < HEX_PATTERN_LEN; j++) {
-                                if (!is_hex_char(buf[i + 2 + j])) { valid = 0; break; }
+                            int hex_len = 0;
+                            while (i + 2 + hex_len < dc &&
+                                   hex_len <= 192 &&
+                                   is_hex_char(buf[i + 2 + hex_len])) {
+                                hex_len++;
                             }
-                            if (!valid) continue;
-                            if (buf[i + 2 + HEX_PATTERN_LEN] != '\'') continue;
+                            if (hex_len < 64 || hex_len % 2 != 0) continue;
+                            if (i + 2 + hex_len >= dc || buf[i + 2 + hex_len] != '\'') continue;
+                            pattern_count++;
 
-                            /* Extract key and salt hex */
+                            /* Extract key and infer/verify salt. WeChat versions differ:
+                             * some keep x'<key><salt>' while others keep only x'<key>'. */
                             char key_hex[65], salt_hex[33];
                             memcpy(key_hex, buf + i + 2, 64);
                             key_hex[64] = '\0';
-                            memcpy(salt_hex, buf + i + 2 + 64, 32);
-                            salt_hex[32] = '\0';
+                            salt_hex[0] = '\0';
 
                             /* Convert to lowercase for comparison */
                             for (int j = 0; key_hex[j]; j++)
                                 if (key_hex[j] >= 'A' && key_hex[j] <= 'F')
                                     key_hex[j] += 32;
+
+                            if (hex_len == 96) {
+                                memcpy(salt_hex, buf + i + 2 + 64, 32);
+                                salt_hex[32] = '\0';
+                            } else if (hex_len > 96) {
+                                memcpy(salt_hex, buf + i + 2 + hex_len - 32, 32);
+                                salt_hex[32] = '\0';
+                            }
                             for (int j = 0; salt_hex[j]; j++)
                                 if (salt_hex[j] >= 'A' && salt_hex[j] <= 'F')
                                     salt_hex[j] += 32;
+
+                            int salt_known = 0;
+                            if (salt_hex[0]) {
+                                for (int j = 0; j < g_db_count; j++) {
+                                    if (strcmp(salt_hex, g_db_salts[j]) == 0) {
+                                        salt_known = 1;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!salt_known) {
+                                char verified_salt[33], verified_db[256];
+                                if (!verify_candidate_key(key_hex, verified_salt, verified_db))
+                                    continue;
+                                strcpy(salt_hex, verified_salt);
+                            }
 
                             /* Deduplicate */
                             int dup = 0;
@@ -252,9 +345,9 @@ int main(int argc, char *argv[]) {
                     mach_vm_deallocate(mach_task_self(), data, dc);
                 }
                 /* Advance with overlap to catch patterns spanning chunk boundaries.
-                 * Pattern is x'<96 hex chars>' = 99 bytes total. */
-                if (cs > HEX_PATTERN_LEN + 3)
-                    ca += cs - (HEX_PATTERN_LEN + 3);
+                 * Pattern is x'<64..192 hex chars>' including quotes. */
+                if (cs > 195)
+                    ca += cs - 195;
                 else
                     ca += cs;
             }
@@ -262,8 +355,8 @@ int main(int argc, char *argv[]) {
         addr += size;
     }
 
-    printf("\nScan complete: %zuMB scanned, %d regions, %d unique keys\n",
-           total_scanned / 1024 / 1024, region_count, key_count);
+    printf("\nScan complete: %zuMB scanned, %d regions, %d x'hex' patterns, %d unique keys\n",
+           total_scanned / 1024 / 1024, region_count, pattern_count, key_count);
 
     /* Match keys to DBs */
     printf("\n%-25s %-66s %s\n", "Database", "Key", "Salt");
@@ -306,8 +399,8 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (!db) continue;
-            fprintf(fp, "%s  \"%s\": {\"enc_key\": \"%s\"}",
-                first ? "" : ",\n", db, keys[i].key_hex);
+            fprintf(fp, "%s  \"%s\": {\"enc_key\": \"%s\", \"salt\": \"%s\"}",
+                first ? "" : ",\n", db, keys[i].key_hex, keys[i].salt_hex);
             first = 0;
         }
         fprintf(fp, "\n}\n");

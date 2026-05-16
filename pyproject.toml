@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wechat-cli"
+name = "wechat-macos-exporter"
 version = "0.2.4"
 description = "WeChat data query CLI for LLMs"
 requires-python = ">=3.10"

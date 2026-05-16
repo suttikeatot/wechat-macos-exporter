@@ -42,3 +42,7 @@ Thumbs.db
 # Temp files
 *.tmp
 *.bak
+exports/
+wechat_cli/bin/find_all_keys_macos.arm64.orig
+wechat_cli/bin/find_all_keys_macos.debug
+wechat_entitlements.plist

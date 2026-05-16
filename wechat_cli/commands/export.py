@@ -5,6 +5,8 @@ from datetime import datetime
 
 from ..core.contacts import get_contact_names
 from ..core.messages import (
+    MSG_TYPE_FILTERS,
+    MSG_TYPE_NAMES,
     collect_chat_history,
     parse_time_range,
     resolve_chat_context,
@@ -20,8 +22,9 @@ from ..output.formatter import output
 @click.option("--start-time", default="", help="起始时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--end-time", default="", help="结束时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--limit", default=500, help="导出消息数量")
+@click.option("--type", "msg_type", default=None, type=click.Choice(MSG_TYPE_NAMES), help="消息类型过滤")
 @click.pass_context
-def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
+def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit, msg_type):
     """导出聊天记录为 markdown 或纯文本
 
     \b
@@ -29,6 +32,7 @@ def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
       wechat-cli export "张三" --format markdown
       wechat-cli export "AI交流群" --format txt --output chat.txt
       wechat-cli export "张三" --start-time "2026-04-01" --limit 1000
+      wechat-cli export "张三" --format txt --type text --output chat.txt
     """
     app = ctx.obj
 
@@ -48,9 +52,11 @@ def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
         ctx.exit(1)
 
     names = get_contact_names(app.cache, app.decrypted_dir)
+    type_filter = MSG_TYPE_FILTERS[msg_type] if msg_type else None
     lines, failures = collect_chat_history(
         chat_ctx, names, app.display_name_fn,
         start_ts=start_ts, end_ts=end_ts, limit=limit, offset=0,
+        msg_type_filter=type_filter,
     )
 
     if not lines:
@@ -60,11 +66,12 @@ def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
     chat_type = "群聊" if chat_ctx['is_group'] else "私聊"
     time_range = f"{start_time or '最早'} ~ {end_time or '最新'}"
+    type_label = msg_type or "all"
 
     if fmt == 'markdown':
-        content = _format_markdown(chat_ctx['display_name'], chat_type, time_range, now, lines)
+        content = _format_markdown(chat_ctx['display_name'], chat_type, time_range, type_label, now, lines)
     else:
-        content = _format_txt(chat_ctx['display_name'], chat_type, time_range, now, lines)
+        content = _format_txt(chat_ctx['display_name'], chat_type, time_range, type_label, now, lines)
 
     if output_path:
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -76,23 +83,25 @@ def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
         output(content, 'text')
 
 
-def _format_markdown(display_name, chat_type, time_range, export_time, lines):
+def _format_markdown(display_name, chat_type, time_range, type_label, export_time, lines):
     header = (
         f"# 聊天记录: {display_name}\n\n"
         f"**时间范围:** {time_range}\n\n"
         f"**导出时间:** {export_time}\n\n"
         f"**消息数量:** {len(lines)}\n\n"
-        f"**类型:** {chat_type}\n\n---\n"
+        f"**类型:** {chat_type}\n\n"
+        f"**消息过滤:** {type_label}\n\n---\n"
     )
     body = "\n".join(f"- {line}" for line in lines)
     return header + body
 
 
-def _format_txt(display_name, chat_type, time_range, export_time, lines):
+def _format_txt(display_name, chat_type, time_range, type_label, export_time, lines):
     header = (
         f"聊天记录: {display_name}\n"
         f"类型: {chat_type}\n"
         f"时间范围: {time_range}\n"
+        f"消息过滤: {type_label}\n"
         f"导出时间: {export_time}\n"
         f"消息数量: {len(lines)}\n"
         f"{'=' * 60}"

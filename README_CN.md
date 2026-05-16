@@ -1,12 +1,12 @@
 <div align="center">
 
-# WeChat CLI
+# WeChat MacOS Exporter
 
 **命令行查询本地微信数据，专为 AI 集成设计。**
 
 [![npm version](https://img.shields.io/npm/v/@canghe_ai/wechat-cli.svg)](https://www.npmjs.com/package/@canghe_ai/wechat-cli)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/freestylefly/wechat-cli)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/suttikeatot/wechat-macos-exporter)
 
 聊天记录 · 联系人 · 会话 · 收藏 · 统计 · 导出
 
@@ -56,8 +56,8 @@ pip install wechat-cli
 ### 从源码安装
 
 ```bash
-git clone https://github.com/freestylefly/wechat-cli.git
-cd wechat-cli
+git clone https://github.com/suttikeatot/wechat-macos-exporter.git
+cd wechat-macos-exporter
 pip install -e .
 ```
 
@@ -377,4 +377,4 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 
 ## ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=freestylefly/wechat-cli&type=Date)](https://star-history.com/#freestylefly/wechat-cli&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=suttikeatot/wechat-macos-exporter&type=Date)](https://star-history.com/#suttikeatot/wechat-macos-exporter&Date)
